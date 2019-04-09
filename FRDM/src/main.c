@@ -56,6 +56,9 @@
 /* TODO: insert other definitions and declarations here. */
 
 #ifndef BLOCKING
+//Go between varaiable to extract value from Tx ringbuffer and pass it
+//to the Tx buffer of UART in order to preserve the volatility of UART0->D
+uint8_t element_to_transmint;
 // Ringbuffer for sending data to UART
 ring_t *r_Tx;
 // Ringbuffer for Receiving data from UART
@@ -64,26 +67,30 @@ ring_t *r_Rx;
 
 // Global variable to pass functions into the UART Tx buffer
 volatile uint8_t chr_Tx;
-
+extern uint32_t SystemCoreClock;
 
 uint8_t Rx_ready(void);
 uint8_t Tx_ready(void);
 
-void UART_Init_Polled()
+void UART0_Init()
 {
 	uint16_t sbr = 0;
 	uint32_t baudDiff = 0;
-	//Disable UART to edit it
-	//	UART0->C2 &= ~(UART_C2_TE_MASK | UART_C2_RE_MASK);
+
+	//set clock div to 0
+	SIM->CLKDIV1 = (SIM->CLKDIV1 & ~SIM_CLKDIV1_OUTDIV1_MASK) | SIM_CLKDIV1_OUTDIV1(0);
+	MCG->C1 = (MCG->C1 & ~MCG_C1_CLKS_MASK & ~MCG_C1_IREFS_MASK) | MCG_C1_CLKS(0) | MCG_C1_IREFS(1);
+
+	MCG->C4 = (MCG->C4 & ~MCG_C4_DMX32_MASK) | MCG_C4_DMX32(1);
+	MCG->C4 = (MCG->C4 & ~MCG_C4_DRST_DRS_MASK) | MCG_C4_DRST_DRS(1);
 
 
 	//Set a clock to UART0
-	SIM->SCGC4 |= SIM_SCGC4_UART0_MASK;
+	SIM->SCGC4 = (SIM->SCGC4 & ~SIM_SCGC4_UART0_MASK) | SIM_SCGC4_UART0(1);
 	// enable and select the 48 Mhz clock
-	SIM->SOPT2 &= ~SIM_SOPT2_UART0SRC_MASK;
-	SIM->SOPT2 |= SIM_SOPT2_UART0SRC(1);
+	SIM->SOPT2 = (SIM->SOPT2 & ~SIM_SOPT2_UART0SRC_MASK) | SIM_SOPT2_UART0SRC(1);
 	// enable clock at port A
-	SIM->SCGC5 = SIM_SCGC5_PORTA_MASK;
+	SIM->SCGC5 = (SIM->SCGC5 & ~SIM_SCGC5_PORTA_MASK) | SIM_SCGC5_PORTA(1);
 
 	//Set PortA located at pin 27 to alternative2 or UART0_RX mode
 	PORTA->PCR[1] = PORT_PCR_MUX(2);
@@ -91,9 +98,7 @@ void UART_Init_Polled()
 	PORTA->PCR[2] = PORT_PCR_MUX(2);
 
 	// set 16x oversampling rate
-	UART0->C4 = UART0_C4_OSR(0xf);
-
-//	UART0->C1 = 0;
+	UART0->C4 |= UART0_C4_OSR(0xf);
 
 	/* Calculate the baud rate modulo divisor, sbr */
 	sbr = CLK / (BAUD * 16);
@@ -109,8 +114,6 @@ void UART_Init_Polled()
 	}
 	UART0->BDH = (UART0->BDH & ~UART_BDH_SBR_MASK) | (uint8_t)(sbr >> 8);
 	UART0->BDL = (uint8_t)sbr;
-
-
 
 #ifdef BLOCKING
 	// enable UART operation
@@ -130,14 +133,18 @@ void UART0_IRQHandler(void)
 	//Rx Interrupt
 	if (Rx_ready())
 	{
-//		chr_Tx = UART0->D;
 		//re-enable RX interrupt after succesful ringbuffer insertion
 		if(insert(r_Rx, UART0->D))
 			UART0->C2 &= ~UART0_C2_RIE_MASK; //Disable Rx interrupt enable if insertion fails
 	}
-	else if(UART0->S1 & UART_S1_TDRE_MASK)
+	else if(Tx_ready())
 	{
-		UART0->D = chr_Tx;
+		remove_ring(r_Tx, &element_to_transmint);// = chr_Tx;
+		UART0->D = element_to_transmint;
+		while((UART0->S1 & UART_S1_TC_MASK) && (r_Tx->Count > 0) && (remove_ring(r_Tx, &element_to_transmint)==0))
+		{
+			UART0->D = element_to_transmint;
+		}
 		UART0->C2 &= ~UART0_C2_TIE_MASK;
 	}
 	__enable_irq();
@@ -160,12 +167,12 @@ void Tx_Wait(void)
 }
 #else
 //Function that ISR calls to see if it can receive stuff
-uint8_t Rx_ready(void)
+inline uint8_t Rx_ready(void)
 {
 	return (UART0->S1 & UART_S1_RDRF_MASK);
 }
 //Function that ISR calls to see if it can send stuff
-uint8_t Tx_ready(void)
+inline uint8_t Tx_ready(void)
 {
 	return (UART0->S1 & UART_S1_TDRE_MASK);
 }
@@ -184,10 +191,15 @@ void UART_Tx(uint8_t data)
 #ifdef BLOCKING
 	Tx_Wait();
 	//put data into transmit buffer
-		UART0->D = data;
+	UART0->D = data;
 #else
-		chr_Tx = data;
+	//put data into transmit ring buffer
+	insert(r_Tx,data);
+//	UART0->D = data;
+	//Set Tx Interrupt Enable flag in C2 to high to send signal via ISR
+	if(Tx_ready()){
 		UART0->C2 |= UART_C2_TIE_MASK;
+	}
 #endif
 
 }
@@ -207,31 +219,47 @@ void printUART( const char* format, ... )
 	}
 }
 
+void LED_Init(void)
+{
+	// Enable modificaiton to PORTB
+	SIM->SCGC5 = SIM_SCGC5_PORTB(1);
+	// Multiplex the pin to red LED
+	PORTB->PCR[18] = PORT_PCR_MUX(1); 									// activate GPIO in Pin Mux Control
+	// Enable the red LED
+	GPIOB->PDDR |= (1 << 18);											// port data direction
+}
+
+
 /*
  * @brief   Application entry point.
  */
 int main(void) {
 	//xfer pointer
-	char rx_to_tx;
+	uint8_t rx_to_tx;
 #ifndef BLOCKING
 	r_Rx = init(256);
 	r_Tx = init(256);
 #endif
 	//TODO: replace this with clock function
-	BOARD_InitBootClocks();
-	UART_Init_Polled();
-
+//	BOARD_InitBootClocks();
+	UART0_Init();
+	LED_Init();
 	/* Enter an infinite loop */
+
 	while(1) {
+
 #ifdef BLOCKING
 		UART_Tx(UART_Rx());
 #endif
+		GPIOB->PTOR |= (1<<18);
 		if(r_Rx->Count>0)
 		{
 			remove_ring(r_Rx, &rx_to_tx);
-//			insert(r_Tx, rx_to_tx);
-			UART_Tx(rx_to_tx);
+			//insert(r_Tx, rx_to_tx);
+			if(Tx_ready())
+				UART_Tx(rx_to_tx);
 		}
+		GPIOB->PTOR |= (1<<18);
 
 	}
 	return 0 ;

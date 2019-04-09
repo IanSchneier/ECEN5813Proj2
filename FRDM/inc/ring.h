@@ -45,7 +45,7 @@ typedef struct
 
 ring_t *init( int length );
 int insert( ring_t *ring, char data );
-int remove_ring( ring_t *ring, char *data );
+int remove_ring( ring_t *ring, uint8_t *data );
 int entries( ring_t *ring );
 int count( ring_t *ring );
 

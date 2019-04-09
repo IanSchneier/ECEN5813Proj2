@@ -70,7 +70,7 @@ int insert( ring_t *ring, char data )
 
 
 
-int remove_ring( ring_t *ring, char *data )
+int remove_ring( ring_t *ring, uint8_t *data )
 {
 #ifdef SAFE
 	//if((ring->Outi != ring->Ini) && (ring->Count > 0))
