@@ -50,168 +50,188 @@
 #define CLK (48000000)
 
 /* setting to configure if UART will be polled or interrupt-based */
-#if 1
+#if 0
 #define BLOCKING
 #endif
 /* TODO: insert other definitions and declarations here. */
 
-//ringbuffer global
-ring_t *r;
+#ifndef BLOCKING
+// Ringbuffer for sending data to UART
+ring_t *r_Tx;
+// Ringbuffer for Receiving data from UART
+ring_t *r_Rx;
+#endif
+
+// Global variable to pass functions into the UART Tx buffer
+volatile uint8_t chr_Tx;
+
+
+uint8_t Rx_ready(void);
+uint8_t Tx_ready(void);
 
 void UART_Init_Polled()
 {
 	uint16_t sbr = 0;
 	uint32_t baudDiff = 0;
+	//Disable UART to edit it
+	//	UART0->C2 &= ~(UART_C2_TE_MASK | UART_C2_RE_MASK);
 
-	// Disable UART
-	UART0->C2 &= ~(UART_C2_TE_MASK | UART_C2_RE_MASK);
-	//	/* Write the sbr value to the BDH and BDL registers*/
+
+	//Set a clock to UART0
+	SIM->SCGC4 |= SIM_SCGC4_UART0_MASK;
+	// enable and select the 48 Mhz clock
+	SIM->SOPT2 &= ~SIM_SOPT2_UART0SRC_MASK;
+	SIM->SOPT2 |= SIM_SOPT2_UART0SRC(1);
+	// enable clock at port A
+	SIM->SCGC5 = SIM_SCGC5_PORTA_MASK;
+
+	//Set PortA located at pin 27 to alternative2 or UART0_RX mode
+	PORTA->PCR[1] = PORT_PCR_MUX(2);
+	//Set PortA located at pin 28 to alternative2 or UART0_TX mode
+	PORTA->PCR[2] = PORT_PCR_MUX(2);
+
+	// set 16x oversampling rate
+	UART0->C4 = UART0_C4_OSR(0xf);
+
+//	UART0->C1 = 0;
 
 	/* Calculate the baud rate modulo divisor, sbr */
-	sbr = 48000000 / (BAUD * 16);
+	sbr = CLK / (BAUD * 16);
 
 	/* Calculate the baud rate based on the temporary SBR values */
-	baudDiff = (48000000 / (sbr * 16)) - BAUD;
+	baudDiff = (CLK / (sbr * 16)) - BAUD;
 
 	/* Select the better value between sbr and (sbr + 1) */
-	if (baudDiff > (BAUD - (48000000 / (16 * (sbr + 1)))))
+	if (baudDiff > (BAUD - (CLK / (16 * (sbr + 1)))))
 	{
-		baudDiff = BAUD - (48000000 / (16 * (sbr + 1)));
+		baudDiff = BAUD - (CLK / (16 * (sbr + 1)));
 		sbr++;
 	}
 	UART0->BDH = (UART0->BDH & ~UART_BDH_SBR_MASK) | (uint8_t)(sbr >> 8);
 	UART0->BDL = (uint8_t)sbr;
 
-	//PTA1 at pin 27 - UART0_RX, ALT2
-	//PTA2 at pin 28 - UART0_TX, ALT2
-	PORTA->PCR[1]=PORT_PCR_MUX(2);
-	PORTA->PCR[2]=PORT_PCR_MUX(2);
 
 
-	//Set clock source of UART0 to be MCGFLLCLK
-	SIM->SOPT2 |= 0x4000000;
-//	SIM_SOPT2 &= SIM_SOPT2_UART0SRC_MASK;
-//	SIM_SOPT2 |= SIM_SOPT2_UART0SRC(1);
-	//System Clock Gating Control Register 4
-	SIM->SCGC4 |= SIM_SCGC4_UART0_MASK; //0x400
-
-
-	//Baud rate register high
-	//#ifdef POLL
-	//	UART0->BDH = 0b00000000;
-	//#endif
-	//	UART0->BDL = 0;
-	//oversampling ratio of 16x
-	UART0->C4 = 0x0f;
-	//Set to 8-bit no parity
-	UART0->C1 = 0;
-	// Enable UART TX and RX.
-	UART0->C2 = (UART_C2_TE_MASK | UART_C2_RE_MASK );//| UART_C2_TIE_MASK | UART_C2_RIE_MASK);
-
-	//what?
-	//UART0->C2 |= UART0_C2_RIE_MASK;
-#ifndef BLOCKING
-	//__enable_irq();
+#ifdef BLOCKING
+	// enable UART operation
+	UART0->C2 = (UART0_C2_RE_MASK | UART0_C2_TE_MASK );
+	__enable_irq();
+#else
+	// enable UART operation via interrupts
+	UART0->C2 |= (UART0_C2_RE_MASK | UART0_C2_TE_MASK | UART_C2_RIE_MASK);
 	NVIC_EnableIRQ(UART0_IRQn);
 #endif
 }
 
 #ifndef BLOCKING
-void UART0_IRQ(void)
+void UART0_IRQHandler(void)
 {
 	__disable_irq();
-//	if ((UART0->C2 & UART0_C2_TIE_MASK) == UART0_C2_TIE_MASK)
-//	{
-//		//disable TX interrupt
-//		UART0->C2 &= ~UART0_C2_TIE_MASK;
-//
-//		//while(!(UART0->S1 & UART_S1_TDRE_MASK));
-//		//remove_ring(r, UART0->D);
-//
-//		UART0->C2 |= UART0_C2_RIE_MASK;		//enabling RX interrupt
-//	}
-//	if(UART0->S1 & UART_S1_TDRE_MASK)
-//	{
-//		//initiate Rx if the Receive Data Register Full Flag is high
-//		//while(!(UART0->S1 & UART_S1_RDRF_MASK));
-//		insert(r, UART0->D);
-//		//TODO: insert full buffer check
-//	}
-	NVIC_EnableIRQ(UART0_IRQn);
+	//Rx Interrupt
+	if (Rx_ready())
+	{
+//		chr_Tx = UART0->D;
+		//re-enable RX interrupt after succesful ringbuffer insertion
+		if(insert(r_Rx, UART0->D))
+			UART0->C2 &= ~UART0_C2_RIE_MASK; //Disable Rx interrupt enable if insertion fails
+	}
+	else if(UART0->S1 & UART_S1_TDRE_MASK)
+	{
+		UART0->D = chr_Tx;
+		UART0->C2 &= ~UART0_C2_TIE_MASK;
+	}
 	__enable_irq();
 
 }
 #endif
 
-
-void UART_Tx(uint8_t data)
-{
-	//Wait until transmit buffer is empty
-	while(!(UART0->S1 & UART_S1_TDRE_MASK));
-	//put data into transmit buffer
-	UART0->D = data;
-}
-//// Fuction to check if Tx is ready to send stuff
-//uint8_t Tx_Ready(void)
-//{
-//	return !(UART0->S1 & UART_S1_TDRE_MASK);
-//}
-//
-// Fuction to check if Tx is ready to send stuff
-
-uint8_t Rx_Ready(void)
-{
-	return (UART0->S1 & UART_S1_RDRF_MASK);
-}
-
-uint8_t UART_Rx()
+#ifdef BLOCKING
+// Function to wait for Rx buffer to be empty
+void Rx_wait(void)
 {
 	//wait for received data buffer to be full before continuing
 	while(!(UART0->S1 & UART_S1_RDRF_MASK));
-	uint8_t data = UART0->D;
-	return data;
 }
-// UART implementation of printf
-void printUART( const char* format, ... ) {
-	char str[0xff];
-    va_list args;
-    va_start( args, format );
-    snprintf(str,0xff, format, args);
-    va_end( args );
 
-    for(size_t i=0; i< strlen(str);i++){
-    	UART_Tx(str[i]);
-    }
+// Function to block PC until Tx is ready to send stuff
+void Tx_Wait(void)
+{
+	while(!(UART0->S1 & UART_S1_TDRE_MASK));
+}
+#else
+//Function that ISR calls to see if it can receive stuff
+uint8_t Rx_ready(void)
+{
+	return (UART0->S1 & UART_S1_RDRF_MASK);
+}
+//Function that ISR calls to see if it can send stuff
+uint8_t Tx_ready(void)
+{
+	return (UART0->S1 & UART_S1_TDRE_MASK);
+}
+#endif
+
+uint8_t UART_Rx()
+{
+#ifdef BLOCKING
+	Rx_wait();
+#endif
+	return UART0->D;
+}
+
+void UART_Tx(uint8_t data)
+{
+#ifdef BLOCKING
+	Tx_Wait();
+	//put data into transmit buffer
+		UART0->D = data;
+#else
+		chr_Tx = data;
+		UART0->C2 |= UART_C2_TIE_MASK;
+#endif
+
+}
+
+// UART implementation of printf
+void printUART( const char* format, ... )
+{
+	char str[0xff];
+	va_list args;
+	va_start( args, format );
+	snprintf(str,0xff, format, args);
+	va_end( args );
+
+	for(size_t i=0; i< strlen(str);i++)
+	{
+		UART_Tx(str[i]);
+	}
 }
 
 /*
  * @brief   Application entry point.
  */
 int main(void) {
-
-
-	r = init(256);
-//	/* Init board hardware. */
-	BOARD_InitBootPins();
+	//xfer pointer
+	char rx_to_tx;
+#ifndef BLOCKING
+	r_Rx = init(256);
+	r_Tx = init(256);
+#endif
+	//TODO: replace this with clock function
 	BOARD_InitBootClocks();
-	BOARD_InitBootPeripherals();
-//	/* Init FSL debug console. */
-	BOARD_InitDebugConsole();
-
-
 	UART_Init_Polled();
-	//printUART("Hello World\n");
 
-	/* Force the counter to be placed into memory. */
-//	char i = 0;
-	/* Enter an infinite loop, just incrementing a counter. */
+	/* Enter an infinite loop */
 	while(1) {
-
+#ifdef BLOCKING
 		UART_Tx(UART_Rx());
-//		remove_ring(r,&i);
-//		if(i!='\0')
-//			UART_Tx(i);
-
+#endif
+		if(r_Rx->Count>0)
+		{
+			remove_ring(r_Rx, &rx_to_tx);
+//			insert(r_Tx, rx_to_tx);
+			UART_Tx(rx_to_tx);
+		}
 
 	}
 	return 0 ;
