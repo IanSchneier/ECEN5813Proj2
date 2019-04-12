@@ -4,20 +4,29 @@
 
 # Add inputs and outputs from these tool invocations to the build variables 
 C_SRCS += \
+../src/LED.c \
+../src/UART0.c \
 ../src/main.c \
 ../src/mtb.c \
+../src/report.c \
 ../src/ring.c \
 ../src/semihost_hardfault.c 
 
 OBJS += \
+./src/LED.o \
+./src/UART0.o \
 ./src/main.o \
 ./src/mtb.o \
+./src/report.o \
 ./src/ring.o \
 ./src/semihost_hardfault.o 
 
 C_DEPS += \
+./src/LED.d \
+./src/UART0.d \
 ./src/main.d \
 ./src/mtb.d \
+./src/report.d \
 ./src/ring.d \
 ./src/semihost_hardfault.d 
 
